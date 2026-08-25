@@ -1,0 +1,39 @@
+# Build directories
+/build/
+/cmake-build-*/
+out/
+
+# CMake local/user-specific files
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Compiled firmware / build artifacts
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+*.o
+*.obj
+*.d
+*.a
+*.lib
+
+# CLion / JetBrains
+.idea/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary / backup files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
