@@ -18,6 +18,9 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+
+#include <stdio.h>
+
 #include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -47,12 +50,33 @@ I2S_HandleTypeDef hi2s3;
 
 SPI_HandleTypeDef hspi1;
 
-/* Definitions for defaultTask */
-osThreadId_t defaultTaskHandle;
-const osThreadAttr_t defaultTask_attributes = {
-  .name = "defaultTask",
+UART_HandleTypeDef huart2;
+
+/* Definitions for controlTask */
+osThreadId_t controlTaskHandle;
+const osThreadAttr_t controlTask_attributes = {
+  .name = "controlTask",
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for sensorTask */
+osThreadId_t sensorTaskHandle;
+const osThreadAttr_t sensorTask_attributes = {
+  .name = "sensorTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for statusTask */
+osThreadId_t statusTaskHandle;
+const osThreadAttr_t statusTask_attributes = {
+  .name = "statusTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for temperatureQueue */
+osMessageQueueId_t temperatureQueueHandle;
+const osMessageQueueAttr_t temperatureQueue_attributes = {
+  .name = "temperatureQueue"
 };
 /* USER CODE BEGIN PV */
 
@@ -64,7 +88,10 @@ static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_I2S3_Init(void);
 static void MX_SPI1_Init(void);
-void StartDefaultTask(void *argument);
+static void MX_USART2_UART_Init(void);
+void StartControlTask(void *argument);
+void StartSensorTask(void *argument);
+void StartStatusTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -72,6 +99,13 @@ void StartDefaultTask(void *argument);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+static struct ControllerStatus
+{
+  long currentTemperature;
+  long targetTemperature ;
+  uint8_t heaterStage;
+} g_ControllerStatus = {.currentTemperature = 0, .targetTemperature = 70, .heaterStage = 0};
 
 /* USER CODE END 0 */
 
@@ -107,6 +141,7 @@ int main(void)
   MX_I2C1_Init();
   MX_I2S3_Init();
   MX_SPI1_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
@@ -126,13 +161,23 @@ int main(void)
   /* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
 
+  /* Create the queue(s) */
+  /* creation of temperatureQueue */
+  temperatureQueueHandle = osMessageQueueNew (4, sizeof(uint32_t), &temperatureQueue_attributes);
+
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of defaultTask */
-  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+  /* creation of controlTask */
+  controlTaskHandle = osThreadNew(StartControlTask, NULL, &controlTask_attributes);
+
+  /* creation of sensorTask */
+  sensorTaskHandle = osThreadNew(StartSensorTask, NULL, &sensorTask_attributes);
+
+  /* creation of statusTask */
+  statusTaskHandle = osThreadNew(StartStatusTask, NULL, &statusTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -310,6 +355,39 @@ static void MX_SPI1_Init(void)
 }
 
 /**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -425,23 +503,109 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE END 4 */
 
-/* USER CODE BEGIN Header_StartDefaultTask */
+/* USER CODE BEGIN Header_StartControlTask */
 /**
-  * @brief  Function implementing the defaultTask thread.
+  * @brief  Function implementing the controlTask thread.
   * @param  argument: Not used
   * @retval None
   */
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void *argument)
+/* USER CODE END Header_StartControlTask */
+void StartControlTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
+  
   for (;;)
   {
-    HAL_GPIO_TogglePin(LD4_GPIO_Port, LD4_Pin);
-    osDelay(500);
+    osMessageQueueGet(temperatureQueueHandle, &g_ControllerStatus.currentTemperature, 0, osWaitForever);
+    
+    long diff = g_ControllerStatus.targetTemperature - g_ControllerStatus.currentTemperature;
+
+    if (diff <= 0)
+    {
+      g_ControllerStatus.heaterStage = 0;
+      HAL_GPIO_WritePin(LD4_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(LD4_GPIO_Port, LD4_Pin, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(LD4_GPIO_Port, LD5_Pin, GPIO_PIN_RESET);
+    }
+    else if (diff <= 5)
+    {
+      g_ControllerStatus.heaterStage = 1;
+      HAL_GPIO_WritePin(LD4_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(LD4_GPIO_Port, LD4_Pin, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(LD4_GPIO_Port, LD5_Pin, GPIO_PIN_RESET);
+    }
+    else if (diff <= 20)
+    {
+      g_ControllerStatus.heaterStage = 2;
+      HAL_GPIO_WritePin(LD4_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(LD4_GPIO_Port, LD4_Pin, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(LD4_GPIO_Port, LD5_Pin, GPIO_PIN_RESET);
+    }
+    else
+    {
+      g_ControllerStatus.heaterStage = 3;
+      HAL_GPIO_WritePin(LD4_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(LD4_GPIO_Port, LD4_Pin, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(LD4_GPIO_Port, LD5_Pin, GPIO_PIN_SET);
+    }
   }
   /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartSensorTask */
+/**
+* @brief Function implementing the sensorTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartSensorTask */
+void StartSensorTask(void *argument)
+{
+  /* USER CODE BEGIN StartSensorTask */
+  /* Infinite loop */
+  long temperature = 20;
+  for(;;)
+  { 
+    osMessageQueuePut(temperatureQueueHandle, &temperature, 0, 0);
+    
+    temperature += 5;
+    
+    if (temperature > 90)
+      temperature = 20;
+    
+    osDelay(3000);
+  }
+  /* USER CODE END StartSensorTask */
+}
+
+/* USER CODE BEGIN Header_StartStatusTask */
+/**
+* @brief Function implementing the statusTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartStatusTask */
+void StartStatusTask(void *argument)
+{
+  /* USER CODE BEGIN StartStatusTask */
+  char buffer[128];
+  for (;;)
+  {
+    int len = snprintf(
+        buffer,
+        sizeof(buffer),
+        "Temp: %ld, Target: %ld, HeaterStage: %u\r\n",
+        g_ControllerStatus.currentTemperature,
+        g_ControllerStatus.targetTemperature,
+        g_ControllerStatus.heaterStage
+    );
+
+    HAL_UART_Transmit(&huart2, (uint8_t*)buffer, len, HAL_MAX_DELAY);
+
+    osDelay(1000);
+  }
+  /* USER CODE END StartStatusTask */
 }
 
 /**
