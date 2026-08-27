@@ -19,13 +19,11 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 
-#include <stdio.h>
-
 #include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -78,6 +76,11 @@ osMessageQueueId_t temperatureQueueHandle;
 const osMessageQueueAttr_t temperatureQueue_attributes = {
   .name = "temperatureQueue"
 };
+/* Definitions for controllerStatusMutex */
+osMutexId_t controllerStatusMutexHandle;
+const osMutexAttr_t controllerStatusMutex_attributes = {
+  .name = "controllerStatusMutex"
+};
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -100,12 +103,32 @@ void StartStatusTask(void *argument);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+enum eHeaterState : uint8_t
+{
+  ENUM_HEATER_STATE_OFF,
+  ENUM_HEATER_STATE_ONE, // one heating component
+  ENUM_HEATER_STATE_TWO, // two heating components
+  ENUM_HEATER_STATE_THREE // ...
+};
+
+enum ePumpState : uint8_t
+{
+  ENUM_PUMP_STATE_OFF,
+  ENUM_PUMP_STATE_ON
+};
+
 static struct ControllerStatus
 {
   long currentTemperature;
-  long targetTemperature ;
-  uint8_t heaterStage;
-} g_ControllerStatus = {.currentTemperature = 0, .targetTemperature = 70, .heaterStage = 0};
+  long targetTemperature;
+  enum eHeaterState heaterState;
+  enum ePumpState pumpState;
+} g_ControllerStatus = {
+  .currentTemperature = 0,
+  .targetTemperature = 70,
+  .heaterState = ENUM_HEATER_STATE_OFF,
+  .pumpState = ENUM_PUMP_STATE_OFF
+};
 
 /* USER CODE END 0 */
 
@@ -148,6 +171,9 @@ int main(void)
 
   /* Init scheduler */
   osKernelInitialize();
+  /* Create the mutex(es) */
+  /* creation of controllerStatusMutex */
+  controllerStatusMutexHandle = osMutexNew(&controllerStatusMutex_attributes);
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
@@ -515,40 +541,58 @@ void StartControlTask(void *argument)
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
   
+  long currentTemperature = 0;
   for (;;)
   {
-    osMessageQueueGet(temperatureQueueHandle, &g_ControllerStatus.currentTemperature, 0, osWaitForever);
+    osMessageQueueGet(temperatureQueueHandle, &currentTemperature, 0, osWaitForever);
+    
+    osMutexAcquire(controllerStatusMutexHandle, osWaitForever);
+    
+    g_ControllerStatus.currentTemperature = currentTemperature;
     
     long diff = g_ControllerStatus.targetTemperature - g_ControllerStatus.currentTemperature;
 
     if (diff <= 0)
     {
-      g_ControllerStatus.heaterStage = 0;
-      HAL_GPIO_WritePin(LD4_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+      g_ControllerStatus.heaterState = ENUM_HEATER_STATE_OFF;
+      HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
       HAL_GPIO_WritePin(LD4_GPIO_Port, LD4_Pin, GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(LD4_GPIO_Port, LD5_Pin, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(LD5_GPIO_Port, LD5_Pin, GPIO_PIN_RESET);
     }
     else if (diff <= 5)
     {
-      g_ControllerStatus.heaterStage = 1;
-      HAL_GPIO_WritePin(LD4_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
+      g_ControllerStatus.heaterState = ENUM_HEATER_STATE_ONE;
+      HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
       HAL_GPIO_WritePin(LD4_GPIO_Port, LD4_Pin, GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(LD4_GPIO_Port, LD5_Pin, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(LD5_GPIO_Port, LD5_Pin, GPIO_PIN_RESET);
     }
     else if (diff <= 20)
     {
-      g_ControllerStatus.heaterStage = 2;
-      HAL_GPIO_WritePin(LD4_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
+      g_ControllerStatus.heaterState = ENUM_HEATER_STATE_TWO;
+      HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
       HAL_GPIO_WritePin(LD4_GPIO_Port, LD4_Pin, GPIO_PIN_SET);
-      HAL_GPIO_WritePin(LD4_GPIO_Port, LD5_Pin, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(LD5_GPIO_Port, LD5_Pin, GPIO_PIN_RESET);
     }
     else
     {
-      g_ControllerStatus.heaterStage = 3;
-      HAL_GPIO_WritePin(LD4_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
+      g_ControllerStatus.heaterState = ENUM_HEATER_STATE_THREE;
+      HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
       HAL_GPIO_WritePin(LD4_GPIO_Port, LD4_Pin, GPIO_PIN_SET);
-      HAL_GPIO_WritePin(LD4_GPIO_Port, LD5_Pin, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(LD5_GPIO_Port, LD5_Pin, GPIO_PIN_SET);
     }
+    
+    if (g_ControllerStatus.heaterState > 0)
+    {
+      g_ControllerStatus.pumpState = ENUM_PUMP_STATE_ON;
+      HAL_GPIO_WritePin(LD6_GPIO_Port, LD6_Pin, GPIO_PIN_SET);
+    }
+    else
+    {
+      g_ControllerStatus.pumpState = ENUM_PUMP_STATE_OFF;
+      HAL_GPIO_WritePin(LD6_GPIO_Port, LD6_Pin, GPIO_PIN_RESET);
+    }
+    
+    osMutexRelease(controllerStatusMutexHandle);
   }
   /* USER CODE END 5 */
 }
@@ -592,17 +636,21 @@ void StartStatusTask(void *argument)
   char buffer[128];
   for (;;)
   {
+    osMutexAcquire(controllerStatusMutexHandle, osWaitForever);
+    struct ControllerStatus controllerStatus = g_ControllerStatus;
+    osMutexRelease(controllerStatusMutexHandle);
     int len = snprintf(
         buffer,
         sizeof(buffer),
-        "Temp: %ld, Target: %ld, HeaterStage: %u\r\n",
-        g_ControllerStatus.currentTemperature,
-        g_ControllerStatus.targetTemperature,
-        g_ControllerStatus.heaterStage
+        "Temp: %ld, Target: %ld, HeaterState: %u, Pump: %s\r\n",
+        controllerStatus.currentTemperature,
+        controllerStatus.targetTemperature,
+        controllerStatus.heaterState,
+        controllerStatus.pumpState == ENUM_PUMP_STATE_ON ? "ON" : "OFF"
     );
 
     HAL_UART_Transmit(&huart2, (uint8_t*)buffer, len, HAL_MAX_DELAY);
-
+    
     osDelay(1000);
   }
   /* USER CODE END StartStatusTask */
